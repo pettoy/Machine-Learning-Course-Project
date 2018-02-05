@@ -1,0 +1,347 @@
+---
+title: 'Machine Learning project: Developing a Prediction Model' 
+author: "Peter Toyinbo"
+date: "February 4, 2018"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(caret)
+library(randomForest)
+library(gbm)
+library(ggplot2) 
+library(parallel)
+library(doParallel)
+
+```
+
+
+## Executive Summary
+
+
+The purpose of this project is to predict how well a weight lifting exercise is performed using secondary data.
+
+
+Two classifiers were considered: Random Forest and Gradient Boosting Machines. The final choice, Random Forest, performed better with much lower expected out-of-sample error below 2 per thousand.
+
+
+The developed prediction model scored 100% in correctly classifying 20 different test cases into one of five classes.
+
+
+
+## Background
+
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. 
+
+
+In this project, the goal is to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset).
+
+
+
+## Data Preparation
+
+
+### Data description
+
+
+Six young health male participants aged between 20-28 years, with little weight lifting experience, were asked to perform one set of 10 repetitions of a weight lifting excercise under the supervision of an experienced weight lifter.
+
+
+The exercice, the Unilateral Dumbbell Biceps Curl, was performed repeatedly in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E).
+
+
+Class A corresponds to the specified execution of the exercise, while the other 4 classes correspond to common mistakes. 
+
+
+Source: http://groupware.les.inf.puc-rio.br/har#weight_lifting_exercises#ixzz56AlaSYsJ
+
+
+### File retrieval and reading into R:
+
+
+Set up the urls from where to download the files
+
+
+```{r step1, echo=TRUE, tidy=TRUE}
+
+urlTrain <- "http://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+urlTest <- "http://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+
+```
+
+
+Download the files
+
+
+```{r step2, echo=TRUE, tidy=TRUE}
+
+pml_training <-  "pml-training.csv"
+
+if (file.exists(pml_training)) {
+        train1 <- read.csv(pml_training)
+} else { 
+        download.file(urlTrain, pml_training)
+        train1 <- read.csv(pml_training)
+}                           
+
+
+pml_testing <-  "pml-testing.csv"
+
+if (file.exists(pml_testing)) {
+        testcases <- read.csv(pml_testing)
+} else { 
+        download.file(urlTest, pml_testing)
+        testcases <- read.csv(pml_testing)
+}   
+
+```
+
+
+Review the data
+
+
+```{r step3, echo=TRUE, tidy=TRUE}
+
+#str(train1)
+#str(testcases)
+
+```
+
+
+The dataset reading would require some specifications other than the defaults.  Therefore the data were re-read into R, identify "NA", "" and "#DIV/0!" as NA strings.
+
+
+```{r step4, echo=TRUE, tidy=TRUE}
+
+train1 <- read.csv("pml-training.csv",na.strings=c("NA","","#DIV/0!"))
+testcases <- read.csv("pml-testing.csv",na.strings=c("NA","","#DIV/0!"))
+
+#str(train1)
+
+```
+
+
+
+The dataset consisted of 19622 observations of 160 variables (159 features + 1 five-level class label).
+
+
+Exclude the 1st 5 columns (dates) that would not be used as predictors in this study. 
+
+
+```{r step5, echo=TRUE, tidy=TRUE}
+
+train1  <- train1[,-c(1:5)]
+
+```
+
+
+
+### Missing data
+
+
+Dataset was checked for missing data.
+
+
+```{r step6, echo=TRUE, tidy=TRUE}
+
+mean(is.na(train1)) 
+
+```
+
+
+There was 63% missing overall in the data. Next the missing pattern was explored using a histogram.
+
+
+
+```{r step7, echo=TRUE, tidy=TRUE}
+
+propNA <- colSums(is.na(train1))/nrow(train1)
+hist(propNA, nclass = 100, main = "Proportion missing across features", xlab = "Proportion of missing data")  
+
+```
+
+
+The features showed two patterns: either have close to zero missing or in the upper 90% missing. 
+
+
+The variables with high proportion of missing values were excluded from the analysis.
+
+
+```{r step8, echo=TRUE, tidy=TRUE}
+
+hiNAvar <- which(propNA > 0.1)  
+
+train2 <- train1[,-hiNAvar]
+
+mean(is.na(train2))
+str(train2)
+
+```
+
+ 
+The above 55 predictor variables with no missing values were selected. 
+
+
+### Data pre-processing
+
+
+To enhance numerical stability of the models, Centering and Scaling of the predictor variables were performed.
+
+
+A filter was also added to check for zero- or near zero-variance predictors prior to running the pre-processing calculations.
+
+
+
+```{r step9, echo=TRUE, tidy=TRUE}
+
+ppData <- preProcess(train2[, -55], 
+                method = c("center", "scale", "nzv"))
+
+train3 <- predict(ppData, newdata = train2[, -55])
+train3$classe <- as.factor(train2$classe)
+
+str(train3)
+
+
+```
+
+
+## Prediction Model Building
+
+
+The cleaned and preprocessed *train3* dataset was now ready to be used for building the predition model.
+
+It was then split into *training* (to train/develop the model) and *testing* (to test the model and compute the out-of-sample error). The split ratio was 70:30.
+
+
+```{r step10, echo=TRUE, tidy=TRUE}
+
+inTrain <- createDataPartition(train3$classe, p = 0.70, list = FALSE)
+training <- train3[inTrain,]
+testing <- train3[-inTrain,]
+
+dim(training)
+
+```
+
+
+The number of observations in the *training* data had been reduced.
+
+
+Next, the parallel clusters for a faster parallel processing was set up.
+
+
+```{r step11, echo=TRUE, tidy=TRUE}
+
+
+cl <- makeCluster(detectCores() - 1)
+
+registerDoParallel(cl)
+
+```
+
+
+The control parameters were set to perform 10-fold cross-validation. This was to minimize overfitting which will minize out of sample errors.
+
+
+```{r step12, echo=TRUE, tidy=TRUE}
+
+ctrl <- trainControl(classProbs=TRUE,
+                     savePredictions=TRUE,
+                     allowParallel=TRUE,
+                     method = "cv",
+                     number = 10)
+
+```
+
+
+Given the potential substantial noise in the data, two candidate models, Random Forest (RF) and Gradient Boosting Machines (GBM), were fitted over the tuning parameters. 
+
+
+```{r step13, echo=TRUE, tidy=TRUE}
+
+# random forest
+
+set.seed(5555)
+system.time(
+trainMod.rf <- train(classe ~ ., data=training, method="rf", trControl = ctrl))
+
+# Gradient Boosting Machines
+
+set.seed(5555)
+system.time(
+trainMod.gbm <- train(classe ~ ., data=training, method="gbm",trControl = ctrl))
+
+# Stop the clusters
+stopCluster(cl)
+
+```
+
+
+
+## Out of Sample Error
+
+
+
+Two candiate classifiers (training models) were applied on the *testing* data to test their prediction. 
+
+
+
+```{r step14, echo=TRUE, tidy=TRUE}
+
+pred.rf <- predict(trainMod.rf, testing, class = "class")
+pred.gbm <- predict(trainMod.gbm, testing, class = "class")
+
+```
+
+
+The default performance function was used to generate the accuracy and Kappa statistics for either models.
+
+
+The expected out-of-sample error for each model was computed as: 1-accuracy
+        
+
+```{r step15, echo=TRUE, tidy=TRUE}
+
+performance <- as.data.frame(rbind(postResample(pred.rf, testing$classe), 
+                postResample(pred.gbm, testing$classe)))
+performance$Error <- 1-performance$Accuracy
+row.names(performance) <- c("RF", "GBM")
+
+performance
+
+```
+
+
+Given the very low out-of-sample error rate the Random Forest classifier this model was better and more acceptable for the prediction task.
+
+
+
+## Predicting New Cases
+
+
+The final prediction model, Random Forest, was used to predict 20 different test cases as supplied by the *testcases* data
+
+
+```{r step16, echo=TRUE, tidy=TRUE}
+
+pred.cases <- predict(trainMod.rf, testcases)
+
+```
+
+
+## Conclusion
+
+Random Forest model with 10-fold cross-validation produced a very low out-of-sample error below 2 in a thousand, and it predicted the classes of all 10 test cases correctly with 100%.
+
+
+## Reference
+
+Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013. 
+
+Read more: 
+http://groupware.les.inf.puc-rio.br/har#weight_lifting_exercises#ixzz56AmUAJMg
+
